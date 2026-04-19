@@ -429,10 +429,10 @@ body {
 }
 .vu-leds {
   width: 100%;
-  height: 100%;
+  height: 0%;
   background: linear-gradient(to top, var(--green) 0%, var(--green) 60%, var(--gold) 60%, var(--gold) 85%, var(--red) 85%);
-  opacity: 0.1;
-  transition: opacity 0.1s;
+  transition: height 0.05s ease-out;
+  opacity: 1;
 }
 
 .vol-fader-track {

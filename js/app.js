@@ -50,6 +50,12 @@ document.addEventListener('DOMContentLoaded', () => {
     crossfader: 0.5
   };
 
+  // The pad names to reset after changing track
+  const PAD_DEFAULTS = [
+    "HOT CUE", "PAD FX1", "BEAT JUMP", "SAMPLER",
+    "KEYBOARD", "PAD FX2", "BEAT LOOP", "KEY SHIFT"
+  ];
+
   const ensureInit = () => {
     engine.init();
     engine.resume();
@@ -62,7 +68,6 @@ document.addEventListener('DOMContentLoaded', () => {
       const strip = channelStrips[index];
       const knobs = strip.querySelectorAll('.knob');
       
-      // Assume order: Trim, Hi, Mid, Low
       const bindings = [
         { type: 'trim', band: null },
         { type: 'eq', band: 'high' },
@@ -74,18 +79,16 @@ document.addEventListener('DOMContentLoaded', () => {
         let isDragging = false;
         let startY, startVal;
         
-        // Default center
         if (!knob.dataset.val) knob.dataset.val = 0.5;
         
         const updateEngine = (val) => {
           ensureInit();
           const { type, band } = bindings[kIndex];
           if (type === 'eq') {
-            // 0.5 is 0dB, 0 is -26dB, 1 is +6dB
+            // Trim to -26dB bottom, 0dB middle, +6dB top
             let db = val < 0.5 ? (val * 2 * 26) - 26 : (val - 0.5) * 2 * 6;
             engine.setEQ(id, band, db);
           } else if (type === 'trim') {
-            // Trim: 0.5 is 0dB, 0 is -24dB, 1 is +6dB
             let db = val < 0.5 ? (val * 2 * 24) - 24 : (val - 0.5) * 2 * 6;
             engine.setTrim(id, db);
           }
@@ -96,12 +99,10 @@ document.addEventListener('DOMContentLoaded', () => {
           knob.style.transform = `rotate(${deg}deg)`;
         };
 
-        // Render initial UI and Engine state
         renderVisual(0.5);
-        
-        // Add to DOM for AutoMix control later
         if(bindings[kIndex].type === 'eq') {
-          ui[id][`eq${band.charAt(0).toUpperCase() + band.slice(1)}`] = knob;
+          // Explicitly save the DOM node for automated AutoMix referencing
+          ui[id][`eq${bindings[kIndex].band.charAt(0).toUpperCase() + bindings[kIndex].band.slice(1)}`] = knob;
         }
 
         knob.addEventListener('mousedown', (e) => {
@@ -134,7 +135,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // ─── GLOBAL VOLUME CALC (Channel + Crossfader) ───────────────────
   const updateVolumes = () => {
     ensureInit();
-    const xFade = state.crossfader; // 0 (full A) to 1 (full B)
+    const xFade = state.crossfader;
     const volA = parseFloat(ui.A.vol.value);
     const volB = parseFloat(ui.B.vol.value);
     
@@ -151,7 +152,6 @@ document.addEventListener('DOMContentLoaded', () => {
     state.crossfader = parseFloat(e.target.value);
     updateVolumes();
   });
-
 
   // ─── FILE HANDLING & ANALYSIS ───────────────────────────────────────
   const handleFileUpload = async (deckId, file) => {
@@ -178,11 +178,16 @@ document.addEventListener('DOMContentLoaded', () => {
       };
       state[deckId].baseBpm = bpmData.bpm;
 
-      // Reset Pitch/Tempo Fader
+      // Reset Hot Cues, Pitch, and Buttons on new track
+      state[deckId].hotCues = [];
+      u.pads.forEach((pad, i) => {
+        pad.style.background = '#222';
+        pad.style.color = 'var(--orange)';
+        pad.innerText = PAD_DEFAULTS[i];
+      });
       u.pitch.value = 0;
       u.bpm.innerText = bpmData.bpm.toFixed(1);
       u.key.innerText = keyData.camelot;
-      
       u.play.disabled = false;
       u.cue.disabled = false;
 
@@ -194,6 +199,10 @@ document.addEventListener('DOMContentLoaded', () => {
       ui.status.style.color = "var(--green)";
       u.jog.classList.remove('spinning');
       updateCompatibility();
+      
+      // Update volume safely
+      updateVolumes();
+
     } catch (err) {
       console.error(err);
       ui.status.innerText = 'ERROR LOADING FILE';
@@ -227,18 +236,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const u = ui[id];
     const st = state[id];
 
-    // Pitch/Tempo Slider (-10 to +10 percent)
+    // Pitch Slider (-10 to +10 percent)
     u.pitch.addEventListener('input', (e) => {
       ensureInit();
       const pct = parseFloat(e.target.value);
-      const rate = 1 + (pct / 100);
+      const rate = 1 + (pct / 100); // 10% change max
       engine.setRate(id, rate);
-      // Update BPM display
       if(st.baseBpm) u.bpm.innerText = (st.baseBpm * rate).toFixed(1);
       updateCompatibility();
     });
 
-    // Play/Pause
     u.play.addEventListener('click', () => {
       ensureInit();
       const wave = id === 'A' ? waveA : waveB;
@@ -258,23 +265,23 @@ document.addEventListener('DOMContentLoaded', () => {
       st.isPlaying = !st.isPlaying;
     });
 
-    // Pioneer CUE logic
-    // If playing: jumps back to stored cue point and pauses.
-    // If paused: drops a new cue point at the current location.
     u.cue.addEventListener('mousedown', () => {
       ensureInit();
       const cuePoint = engine.decks[id].cuePoint || 0;
       
       if (st.isPlaying) {
+        // Stop playback and jump back to cue
         engine.pause(id);
         st.isPlaying = false;
         u.jog.classList.remove('spinning');
         u.play.classList.remove('active');
         u.play.style.boxShadow = '';
-        
         engine.jumpTo(id, cuePoint);
+        
+        // Temporarily play if held (standard logic)
+        // For simplicity: just jump and pause.
       } else {
-        // Drop new cue point (since it's paused, we save the current position)
+        // Drop new cue point
         engine.decks[id].cuePoint = engine.getCurrentTime(id);
       }
       
@@ -287,21 +294,24 @@ document.addEventListener('DOMContentLoaded', () => {
        u.cue.style.color = 'var(--orange)';
     });
 
-    // Pioneer Performance Pads (Hot Cues)
-    // First 4 pads act as Hot Cues. Click empty to store. Click filled to jump.
+    // 4 Hot Cues mapping
     for(let i=0; i<4; i++) {
         const pad = u.pads[i];
         pad.addEventListener('click', () => {
             ensureInit();
-            // If hotcue is not set
+            if(!st.buffer) return;
+            // Set hotcue if undefined
             if(st.hotCues[i] === undefined) {
                st.hotCues[i] = engine.getCurrentTime(id);
                pad.style.background = 'var(--orange)';
-               pad.style.color = '#fff';
+               pad.style.color = '#111';
                pad.innerText = `HC ${i+1}`;
             } else {
-               // Jump to Hot Cue!
+               // Jump
                engine.jumpTo(id, st.hotCues[i]);
+               // If paused, force visual play head update
+               const wave = id === 'A' ? waveA : waveB;
+               wave._drawStatic(); // force re-render if frozen
             }
         });
     }
@@ -311,28 +321,30 @@ document.addEventListener('DOMContentLoaded', () => {
   // ─── AUTOMIX ENGINE ────────────────────────────────────────────────────
   ui.Mixer.autoMix.addEventListener('click', () => {
     ensureInit();
-    if (!state.A.isPlaying) ui.A.play.click(); // trigger standard play logic
+    // Validate engine states
+    if (!state.A.buffer || !state.B.buffer) return;
+    if (!state.A.isPlaying) ui.A.play.click(); 
     
     ui.Mixer.autoMix.disabled = true;
     ui.Mixer.autoMix.classList.add('active');
     ui.status.innerText = 'MIXING IN PROGRESS...';
     ui.status.style.color = "var(--orange)";
 
-    // Update crossfader DOM visually
     engine.onTransitionProgress = (pct) => {
       ui.Mixer.crossfader.value = pct;
       state.crossfader = pct;
-      updateVolumes(); // Updates actual WebAudio Gain Node
+      updateVolumes(); 
       
-      // Update EQ Knobs visually
+      // EQ Visual Update
       let pctCut = Math.min(1, pct * 2); 
-      let aLowVal = 0.5 - (0.5 * pctCut);     // 0.5 -> 0  (0dB to -26dB)
-      let bLowVal = 0 + (0.5 * pctCut);       // 0 -> 0.5  (-26dB to 0dB)
+      let aLowVal = 0.5 - (0.5 * pctCut);     
+      let bLowVal = 0 + (0.5 * pctCut);       
       
       const renderVisual = (knob, val) => {
          knob.dataset.val = val; 
          knob.style.transform = `rotate(${(val - 0.5) * 300}deg)`;
       }
+      // Ensure we hit the dynamic binding property
       if(ui.A.eqLow) renderVisual(ui.A.eqLow, aLowVal);
       if(ui.B.eqLow) renderVisual(ui.B.eqLow, bLowVal);
     };
@@ -373,14 +385,16 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  // ─── VU METER UPDATE LOOP ────────────────────────────────────────────────
+  // ─── VU METER UPDATE LOOP (FIXED AS HEIGHT BAR) ─────────────────────────
   const renderVU = () => {
     if (engine._initialized) {
       ['A', 'B'].forEach(id => {
         let level = engine.getLevel(id); 
-        level = Math.min(1, level * 2.5); // artificial visual boost
+        level = Math.min(1, level * 2.5); // scale response
         if(!state[id].isPlaying) level *= 0.1; 
-        ui[id].vu.style.opacity = level.toString();
+        
+        // Sets the height to simulate glowing LED blocks turning on
+        ui[id].vu.style.height = `${level * 100}%`;
       });
     }
     requestAnimationFrame(renderVU);
