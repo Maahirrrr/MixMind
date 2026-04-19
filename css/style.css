@@ -25,15 +25,19 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 /* ─── SOFTWARE BOARD (TOP) ─── */
 .software-board {
-  height: 25vh;
+  flex: 0 0 25vh;
+  min-height: 25vh;
   background: #000;
   border-bottom: 2px solid var(--panel-border);
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .top-bar {
@@ -64,10 +68,12 @@ body {
   display: flex;
   flex-direction: column;
   flex: 1;
+  min-height: 0;
   position: relative;
 }
 .wave-track {
   flex: 1;
+  min-height: 0;
   position: relative;
   border-bottom: 1px solid #111;
   background: #050505;
@@ -145,6 +151,7 @@ body {
   padding: 20px;
   border-right: 1px solid #111;
   position: relative;
+  min-height: 0;
 }
 .hardware-deck:last-child {
   border-right: none;
