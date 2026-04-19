@@ -103,7 +103,10 @@ class MixMindEngine {
     d.source = src;
     d.startedAt = this.ctx.currentTime;
     d.isPlaying = true;
-    src.onended = () => { d.isPlaying = false; };
+    src.onended = () => {
+      d.isPlaying = false;
+      if (this.onDeckEnded) this.onDeckEnded(deckId);
+    };
   }
 
   _stopDeck(deckId) {
@@ -235,33 +238,48 @@ class MixMindEngine {
     const phase1End = startTimeTo + fadeDuration * 0.5;
     const endTime = startTimeTo + fadeDuration;
 
-    // Isolator Swap
+    // Isolator Swap (Linear for EQ DB values)
     dFrom.lowEQ.gain.linearRampToValueAtTime(-26, phase1End);
     dTo.lowEQ.gain.linearRampToValueAtTime(0, phase1End);
 
     dFrom.midEQ.gain.linearRampToValueAtTime(-10, phase1End);
     dFrom.midEQ.gain.linearRampToValueAtTime(0, endTime);
 
+    // Volume crossfade (Exponential for True Gain mapping -> avoids zipper noise)
+    dFrom.gainNode.gain.setValueAtTime(dFrom.gainNode.gain.value, startTimeTo);
+    dFrom.gainNode.gain.exponentialRampToValueAtTime(0.0001, endTime); // Never purely 0
+    dTo.gainNode.gain.setValueAtTime(0.0001, startTimeTo);
+    dTo.gainNode.gain.exponentialRampToValueAtTime(1.0, endTime);
+
     if (this.onTransitionProgress) {
-      const startMs = (startTimeTo - this.ctx.currentTime) * 1000;
-      const durationMs = fadeDuration * 1000;
-      let startReal = Date.now() + startMs;
+      const startCtxTime = startTimeTo;
       const tick = () => {
-        const elapsed = Date.now() - startReal;
-        // Sigmoid easing for professional smoother curve than linear
-        let rawPct = Math.min(1, Math.max(0, elapsed / durationMs));
-        let progress = rawPct < 0.5 ? 2 * rawPct * rawPct : -1 + (4 - 2 * rawPct) * rawPct;
+        const now = this.ctx.currentTime;
+        let rawPct = Math.min(1, Math.max(0, (now - startCtxTime) / fadeDuration));
+        
+        // Smoothstep interpolation
+        let progress = rawPct * rawPct * (3 - 2 * rawPct);
         
         this.onTransitionProgress(progress, fromId, toId);
         
         if (rawPct < 1) requestAnimationFrame(tick);
         else {
-            this._stopDeck(fromId);
-            dFrom.lowEQ.gain.value = 0;
-            if (this.onTransitionDone) this.onTransitionDone(fromId, toId);
+            // Soft-tail Fade out
+            if (dFrom.gainNode) {
+              dFrom.gainNode.gain.setTargetAtTime(0, this.ctx.currentTime, 0.1); 
+              setTimeout(() => {
+                this._stopDeck(fromId);
+                dFrom.lowEQ.gain.value = 0;
+                if (this.onTransitionDone) this.onTransitionDone(fromId, toId);
+              }, 400); 
+            } else {
+              this._stopDeck(fromId);
+              dFrom.lowEQ.gain.value = 0;
+              if (this.onTransitionDone) this.onTransitionDone(fromId, toId);
+            }
         }
       };
-      setTimeout(tick, startMs);
+      requestAnimationFrame(tick);
     }
     return { success: true };
   }

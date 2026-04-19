@@ -62,6 +62,15 @@ document.addEventListener('DOMContentLoaded', () => {
     engine.resume();
   };
 
+  engine.onDeckEnded = (id) => {
+    state[id].isPlaying = false;
+    ui[id].jog.classList.remove('spinning');
+    ui[id].play.classList.remove('active');
+    ui[id].play.style.boxShadow = '';
+    const wave = id === 'A' ? waveA : waveB;
+    wave.stopAnimation();
+  };
+
   // ─── KNOB DRAG LOGIC ──────────────────────────────────────────
   function initKnobs() {
     const channelStrips = document.querySelectorAll('.channel-strip');
@@ -167,10 +176,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const audioBuffer = await engine.ctx.decodeAudioData(arrayBuffer);
       state[deckId].buffer = audioBuffer;
 
-      const [bpmData, keyData] = await Promise.all([
-        MixMindAnalyzer.detectBPM(audioBuffer),
-        MixMindAnalyzer.detectKey(audioBuffer)
-      ]);
+      const bpmData = await MixMindAnalyzer.detectBPM(audioBuffer);
+      const keyData = await MixMindAnalyzer.detectKey(audioBuffer);
       const transitions = MixMindAnalyzer.findTransitionPoints(audioBuffer, bpmData.bpm);
       
       state[deckId].analysis = {

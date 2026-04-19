@@ -42,96 +42,111 @@ function rotate(arr, n) {
 
 // ─── BPM Detection ───────────────────────────────────────────────────────────
 async function detectBPM(audioBuffer) {
-  const sampleRate = audioBuffer.sampleRate;
-  const maxDuration = Math.min(audioBuffer.duration, 90);
-  const numSamples = Math.floor(maxDuration * sampleRate);
+  return new Promise(async (resolve) => {
+    const sampleRate = audioBuffer.sampleRate;
+    const maxDuration = Math.min(audioBuffer.duration, 90);
+    const numSamples = Math.floor(maxDuration * sampleRate);
 
-  // Get mono channel (average if stereo)
-  let rawData = audioBuffer.getChannelData(0).slice(0, numSamples);
-  if (audioBuffer.numberOfChannels > 1) {
-    const ch1 = audioBuffer.getChannelData(1).slice(0, numSamples);
-    rawData = rawData.map((v, i) => (v + ch1[i]) * 0.5);
-  }
+    // Get mono channel (average if stereo)
+    let rawData = audioBuffer.getChannelData(0).slice(0, numSamples);
+    if (audioBuffer.numberOfChannels > 1) {
+      const ch1 = audioBuffer.getChannelData(1).slice(0, numSamples);
+      rawData = rawData.map((v, i) => (v + ch1[i]) * 0.5);
+    }
 
-  // Offline context with lowpass filter (isolate kick drum range)
-  const offCtx = new OfflineAudioContext(1, numSamples, sampleRate);
-  const buf = offCtx.createBuffer(1, numSamples, sampleRate);
-  buf.getChannelData(0).set(rawData);
+    // Offline context with lowpass filter (isolate kick drum range)
+    const offCtx = new OfflineAudioContext(1, numSamples, sampleRate);
+    const buf = offCtx.createBuffer(1, numSamples, sampleRate);
+    buf.getChannelData(0).set(rawData);
 
-  const src = offCtx.createBufferSource();
-  src.buffer = buf;
+    const src = offCtx.createBufferSource();
+    src.buffer = buf;
 
-  const lpf = offCtx.createBiquadFilter();
-  lpf.type = 'lowpass';
-  lpf.frequency.value = 220;
-  lpf.Q.value = 0.5;
+    const lpf = offCtx.createBiquadFilter();
+    lpf.type = 'lowpass';
+    lpf.frequency.value = 220;
+    lpf.Q.value = 0.5;
 
-  src.connect(lpf);
-  lpf.connect(offCtx.destination);
-  src.start(0);
+    src.connect(lpf);
+    lpf.connect(offCtx.destination);
+    src.start(0);
 
-  const rendered = await offCtx.startRendering();
-  const filtered = rendered.getChannelData(0);
+    const rendered = await offCtx.startRendering();
+    const filtered = rendered.getChannelData(0);
 
-  // RMS energy in 10ms windows
-  const WIN = Math.floor(sampleRate * 0.01);
-  const energy = [];
-  for (let i = 0; i < filtered.length - WIN; i += WIN) {
-    let sum = 0;
-    for (let j = 0; j < WIN; j++) sum += filtered[i + j] ** 2;
-    energy.push(Math.sqrt(sum / WIN));
-  }
+    // RMS energy in 10ms windows
+    const WIN = Math.floor(sampleRate * 0.01);
+    const energy = [];
+    for (let i = 0; i < filtered.length - WIN; i += WIN) {
+      let sum = 0;
+      for (let j = 0; j < WIN; j++) sum += filtered[i + j] ** 2;
+      energy.push(Math.sqrt(sum / WIN));
+    }
 
-  // Onset strength (half-wave rectified difference)
-  const onset = new Float64Array(energy.length);
-  for (let i = 1; i < energy.length; i++) {
-    onset[i] = Math.max(0, energy[i] - energy[i - 1]);
-  }
+    // Onset strength (half-wave rectified difference)
+    const onset = new Float64Array(energy.length);
+    for (let i = 1; i < energy.length; i++) {
+      onset[i] = Math.max(0, energy[i] - energy[i - 1]);
+    }
 
-  // Autocorrelation on onset function
-  const hopDur = 0.01; // 10ms per hop
-  const lagFor = bpm => Math.round((60 / bpm) / hopDur);
-  const minLag = lagFor(200);
-  const maxLag = lagFor(55);
-  const acf = new Float64Array(maxLag + 1);
+    const hopDur = 0.01; // 10ms per hop
+    const lagFor = bpm => Math.round((60 / bpm) / hopDur);
+    const minLag = lagFor(200);
+    const maxLag = lagFor(55);
 
-  for (let lag = minLag; lag <= maxLag; lag++) {
-    let s = 0;
-    for (let i = 0; i < onset.length - lag; i++) s += onset[i] * onset[i + lag];
-    acf[lag] = s;
-  }
+    // Move heavy autocorrelation to a Web Worker
+    const workerCode = `
+      self.onmessage = ({ data: { onset, minLag, maxLag, hopDur } }) => {
+        const acf = new Float64Array(maxLag + 1);
+        for (let lag = minLag; lag <= maxLag; lag++) {
+          let s = 0;
+          for (let i = 0; i < onset.length - lag; i++) s += onset[i] * onset[i + lag];
+          acf[lag] = s;
+        }
+        self.postMessage({ acf: Array.from(acf) });
+      };
+    `;
+    const blob = new Blob([workerCode], { type: 'application/javascript' });
+    const worker = new Worker(URL.createObjectURL(blob));
+    
+    worker.onmessage = ({ data: { acf } }) => {
+      worker.terminate();
 
-  // Find best lag
-  let best = minLag;
-  for (let lag = minLag; lag <= maxLag; lag++) {
-    if (acf[lag] > acf[best]) best = lag;
-  }
+      // Find best lag
+      let best = minLag;
+      for (let lag = minLag; lag <= maxLag; lag++) {
+        if (acf[lag] > acf[best]) best = lag;
+      }
 
-  // Resolve harmonic ambiguity
-  const halfLag = Math.round(best / 2);
-  if (halfLag >= minLag && acf[halfLag] > acf[best] * 0.85) {
-    best = halfLag; // double-time was the true tempo
-  }
+      // Resolve harmonic ambiguity
+      const halfLag = Math.round(best / 2);
+      if (halfLag >= minLag && acf[halfLag] > acf[best] * 0.85) {
+        best = halfLag; // double-time was the true tempo
+      }
 
-  // Also check 2x lag (half-time)
-  const doubleLag = best * 2;
-  if (doubleLag <= maxLag && acf[doubleLag] > acf[best] * 0.9) {
-    // Both are valid — pick whichever is closer to 120
-    const bpmA = 60 / (best * hopDur);
-    const bpmB = 60 / (doubleLag * hopDur);
-    if (Math.abs(bpmB - 120) < Math.abs(bpmA - 120)) best = doubleLag;
-  }
+      // Also check 2x lag (half-time)
+      const doubleLag = best * 2;
+      if (doubleLag <= maxLag && acf[doubleLag] > acf[best] * 0.9) {
+        // Both are valid — pick whichever is closer to 120
+        const bpmA = 60 / (best * hopDur);
+        const bpmB = 60 / (doubleLag * hopDur);
+        if (Math.abs(bpmB - 120) < Math.abs(bpmA - 120)) best = doubleLag;
+      }
 
-  let rawBpm = 60 / (best * hopDur);
+      let rawBpm = 60 / (best * hopDur);
 
-  // Normalize to 70–175 BPM fallback (handle extreme half/double boundaries)
-  while (rawBpm < 70) rawBpm *= 2;
-  while (rawBpm > 175) rawBpm /= 2;
+      // Normalize to 70–175 BPM fallback
+      while (rawBpm < 70) rawBpm *= 2;
+      while (rawBpm > 175) rawBpm /= 2;
 
-  const bpm = Math.round(rawBpm * 10) / 10;
-  const beatPeriod = 60 / bpm;
+      const bpm = Math.round(rawBpm * 10) / 10;
+      const beatPeriod = 60 / bpm;
 
-  return { bpm, beatPeriod };
+      resolve({ bpm, beatPeriod });
+    };
+    
+    worker.postMessage({ onset: Array.from(onset), minLag, maxLag, hopDur });
+  });
 }
 
 
@@ -286,9 +301,12 @@ function accumulateChroma(mag, sampleRate, fftSize, chroma) {
     const nearest = Math.round(pitchClass);
     const dist = Math.abs(pitchClass - nearest);
     
-    // Gaussian weight — bins far from semitone center contribute less
     const weight = Math.exp(-(dist * dist) / (2 * 0.25 * 0.25));
-    chroma[((nearest % 12) + 12) % 12] += mag[bin] * weight;
+    // Octave weight: lower octaves matter more
+    const octave = Math.floor(midi / 12);
+    const octaveWeight = 1 / (1 + Math.abs(octave - 4) * 0.5);
+    
+    chroma[((nearest % 12) + 12) % 12] += mag[bin] * weight * octaveWeight;
   }
 }
 
@@ -318,11 +336,12 @@ function camelotCompat(cam1, cam2, energy1 = 0.5, energy2 = 0.5) {
       }
   }
 
-  // Energy compatibility penalty
-  const energyDelta = Math.abs(energy1 - energy2);
-  const energyScore = Math.max(0, 1 - energyDelta * 1.5); // 0.67 delta = score 0
-  
-  // Combined: key matters more (70%) but energy matters (30%)
+  // Energy compatibility penalty (Asymmetric directionality)
+  const energyDelta = energy2 - energy1; // signed
+  const energyScore = energyDelta >= 0
+    ? Math.min(1, 0.7 + energyDelta * 0.5)   // building energy
+    : Math.max(0, 0.7 + energyDelta * 1.5);  // dropping energy
+
   const combined = keyScore * 0.7 + energyScore * 0.3;
   return { score: combined, label: label };
 }
@@ -334,19 +353,23 @@ function findTransitionPoints(audioBuffer, bpm) {
   const WIN = Math.floor(sr * 0.05); // 50ms windows 
 
   const energy = [];
+  let peakE = 0, sumE = 0;
+  
   for (let i = 0; i < ch.length - WIN; i += WIN) {
     let s = 0;
     for (let j = 0; j < WIN; j++) s += ch[i + j] ** 2;
-    energy.push(Math.sqrt(s / WIN));
+    let currE = Math.sqrt(s / WIN);
+    energy.push(currE);
+    
+    if (currE > peakE) peakE = currE;
+    sumE += currE;
   }
 
+  const avgE = sumE / energy.length;
   const duration = audioBuffer.duration;
   const beatPeriod = 60 / bpm;
   const barPeriod = beatPeriod * 4;
 
-  const peakE = Math.max(...energy);
-  const avgE = energy.reduce((a, b) => a + b, 0) / energy.length;
-  // Use normalized average energy as generic 'track energy level' for compatibility mapping
   const trackEnergy = Math.min(1, avgE / (peakE || 1));
 
   // OUT point: find last bar where energy stays above 70% of peak for 4 consecutive windows

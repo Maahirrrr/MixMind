@@ -17,6 +17,16 @@ class WaveformRenderer {
     this.outPoint = null;
     this.inPoint = null;
     this._resize();
+
+    this._resizeObserver = new ResizeObserver(() => {
+      this._resize();
+      if (this.peaks && this.audioBuffer) {
+        this.peaks = this._computePeaks(this.audioBuffer, Math.floor(this.W));
+        this._drawToStaticCanvas();
+        if (!this.getTime) this._blitStatic(); // manually update frame if halted
+      }
+    });
+    this._resizeObserver.observe(this.canvas);
   }
 
   _resize() {
@@ -35,7 +45,10 @@ class WaveformRenderer {
     this.outPoint = outPoint;
     this.inPoint = inPoint;
     this.peaks = this._computePeaks(audioBuffer, Math.floor(this.W));
-    this._drawStatic();
+    
+    // Cache static layer to offscreen canvas
+    this._drawToStaticCanvas();
+    this._blitStatic();
   }
 
   _computePeaks(buffer, numBars) {
@@ -45,7 +58,7 @@ class WaveformRenderer {
     for (let i = 0; i < numBars; i++) {
       let max = 0;
       const start = i * blockSize;
-      for (let j = 0; j < blockSize; j++) {
+      for (let j = 0; j < Math.min(blockSize, ch.length - start); j++) {
         const abs = Math.abs(ch[start + j]);
         if (abs > max) max = abs;
       }
@@ -54,8 +67,16 @@ class WaveformRenderer {
     return peaks;
   }
 
-  _drawStatic() {
-    const { ctx: c, W, H, peaks, color } = this;
+  _drawToStaticCanvas() {
+    if (!this._staticCanvas) this._staticCanvas = document.createElement('canvas');
+    this._staticCanvas.width = this.canvas.width;
+    this._staticCanvas.height = this.canvas.height;
+    const c = this._staticCanvas.getContext('2d');
+    
+    const dpr = window.devicePixelRatio || 1;
+    c.scale(dpr, dpr);
+
+    const { W, H, peaks } = this;
     c.clearRect(0, 0, W, H);
 
     // Background
@@ -129,8 +150,14 @@ class WaveformRenderer {
     }
   }
 
+  _blitStatic() {
+    if (this._staticCanvas) {
+      // Direct raw blit bypasses context state mapping
+      this.ctx.drawImage(this._staticCanvas, 0, 0, this.canvas.width, this.canvas.height, 0, 0, this.W, this.H);
+    }
+  }
+
   _barColor(i, total) {
-    // Gradient from left (purple) to right (cyan)
     const t = i / total;
     const r1 = 124, g1 = 58, b1 = 237;   // #7C3AED purple
     const r2 = 6, g2 = 182, b2 = 212;    // #06B6D4 cyan
@@ -152,7 +179,7 @@ class WaveformRenderer {
   }
 
   _tick() {
-    this._drawStatic();
+    this._blitStatic();
 
     if (this.getTime && this.duration > 0) {
       const t = this.getTime();
@@ -182,6 +209,7 @@ class WaveformRenderer {
 
   clear() {
     this.stopAnimation();
+    if (this._resizeObserver) this._resizeObserver.disconnect();
     this.audioBuffer = null;
     this.peaks = null;
     this.outPoint = null;
