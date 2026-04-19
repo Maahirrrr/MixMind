@@ -192,69 +192,73 @@ class MixMindEngine {
   }
 
   // ── Auto Mix ──
-  autoMix(fadeDuration = 16) {
+  autoMix(fromId, toId, fadeDuration = 16) {
     this.resume();
-    const dA = this.decks['A'], dB = this.decks['B'];
-    if (!dA.isPlaying || !dB.buffer) return { error: 'Deck A must be playing & B loaded.' };
+    const dFrom = this.decks[fromId], dTo = this.decks[toId];
+    if (!dFrom.isPlaying || !dTo.buffer) return { error: `Active deck must be playing & next deck loaded.` };
 
-    const bpmA = dA.bpm * dA.rate || 120; // Effective BPM
-    const bpmB = dB.bpm || 120;
-    const beatPeriod = 60 / bpmA;
+    const bpmFrom = (dFrom.bpm * dFrom.rate) || 120;
+    const bpmTo = dTo.bpm || 120;
+    const beatPeriod = 60 / bpmFrom;
     const barPeriod = beatPeriod * 4;
 
-    const posA = this.getCurrentTime('A');
-    const barsElapsed = posA / barPeriod;
+    // AI Phrase Matching: find next proper 4-bar drop
+    const posFrom = this.getCurrentTime(fromId);
+    const barsElapsed = posFrom / barPeriod;
     const nextBar = (Math.floor(barsElapsed) + 2) * barPeriod;
-    const delayUntilNextBar = nextBar - posA;
-    const startTimeB = this.ctx.currentTime + Math.max(0, delayUntilNextBar);
+    const delayUntilNextBar = nextBar - posFrom;
+    const startTimeTo = this.ctx.currentTime + Math.max(0, delayUntilNextBar);
 
-    const targetBRate = bpmA / bpmB;
-    this.setRate('B', targetBRate);
+    // Sync tempo precisely 
+    const targetToRate = bpmFrom / bpmTo;
+    this.setRate(toId, targetToRate);
     
-    // Hard jump B to 'inPoint'
-    const inOffset = dB.transitions ? dB.transitions.inPoint : 0;
+    // Jump to ML extracted in-point
+    const inOffset = dTo.transitions ? dTo.transitions.inPoint : 0;
     
-    // Play B
-    if (dB.source) { try { dB.source.stop(); } catch (_) {} }
-    const srcB = this.ctx.createBufferSource();
-    srcB.buffer = dB.buffer;
-    srcB.playbackRate.value = targetBRate;
-    srcB.connect(dB.trimNode);
-    srcB.start(startTimeB, inOffset);
-    dB.source = srcB;
-    dB.startedAt = startTimeB;
-    dB.startOffset = inOffset;
-    dB.isPlaying = true;
+    if (dTo.source) { try { dTo.source.stop(); } catch (_) {} }
+    const srcTo = this.ctx.createBufferSource();
+    srcTo.buffer = dTo.buffer;
+    srcTo.playbackRate.value = targetToRate;
+    srcTo.connect(dTo.trimNode);
+    srcTo.start(startTimeTo, inOffset);
+    dTo.source = srcTo;
+    dTo.startedAt = startTimeTo;
+    dTo.startOffset = inOffset;
+    dTo.isPlaying = true;
 
-    // Reset B's Volume & EQ before bringing it in
-    dB.lowEQ.gain.cancelScheduledValues(this.ctx.currentTime);
-    dB.gainNode.gain.cancelScheduledValues(this.ctx.currentTime);
-    dB.lowEQ.gain.setValueAtTime(-26, startTimeB);
+    // Isolate EQs dynamically
+    dTo.lowEQ.gain.cancelScheduledValues(this.ctx.currentTime);
+    dTo.gainNode.gain.cancelScheduledValues(this.ctx.currentTime);
+    dTo.lowEQ.gain.setValueAtTime(-26, startTimeTo);
 
-    const phase1End = startTimeB + fadeDuration * 0.5;
-    const endTime = startTimeB + fadeDuration;
+    const phase1End = startTimeTo + fadeDuration * 0.5;
+    const endTime = startTimeTo + fadeDuration;
 
-    // Simulate crossfader over time: handled in app.js for visual update, but we can do EQ strictly here:
-    dA.lowEQ.gain.linearRampToValueAtTime(-26, phase1End);
-    dB.lowEQ.gain.linearRampToValueAtTime(0, phase1End);
+    // Isolator Swap
+    dFrom.lowEQ.gain.linearRampToValueAtTime(-26, phase1End);
+    dTo.lowEQ.gain.linearRampToValueAtTime(0, phase1End);
 
-    dA.midEQ.gain.linearRampToValueAtTime(-6, phase1End);
-    dA.midEQ.gain.linearRampToValueAtTime(0, endTime);
+    dFrom.midEQ.gain.linearRampToValueAtTime(-10, phase1End);
+    dFrom.midEQ.gain.linearRampToValueAtTime(0, endTime);
 
-    // Callbacks
     if (this.onTransitionProgress) {
-      const startMs = (startTimeB - this.ctx.currentTime) * 1000;
+      const startMs = (startTimeTo - this.ctx.currentTime) * 1000;
       const durationMs = fadeDuration * 1000;
       let startReal = Date.now() + startMs;
       const tick = () => {
         const elapsed = Date.now() - startReal;
-        const progress = Math.min(1, Math.max(0, elapsed / durationMs));
-        this.onTransitionProgress(progress);
-        if (progress < 1) requestAnimationFrame(tick);
+        // Sigmoid easing for professional smoother curve than linear
+        let rawPct = Math.min(1, Math.max(0, elapsed / durationMs));
+        let progress = rawPct < 0.5 ? 2 * rawPct * rawPct : -1 + (4 - 2 * rawPct) * rawPct;
+        
+        this.onTransitionProgress(progress, fromId, toId);
+        
+        if (rawPct < 1) requestAnimationFrame(tick);
         else {
-            this._stopDeck('A');
-            dA.lowEQ.gain.value = 0;
-            if (this.onTransitionDone) this.onTransitionDone();
+            this._stopDeck(fromId);
+            dFrom.lowEQ.gain.value = 0;
+            if (this.onTransitionDone) this.onTransitionDone(fromId, toId);
         }
       };
       setTimeout(tick, startMs);

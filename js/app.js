@@ -47,7 +47,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const state = {
     A: { buffer: null, analysis: null, isPlaying: false, baseBpm: 0, hotCues: [] },
     B: { buffer: null, analysis: null, isPlaying: false, baseBpm: 0, hotCues: [] },
-    crossfader: 0.5
+    crossfader: 0.5,
+    activeDeck: 'A'
   };
 
   // The pad names to reset after changing track
@@ -318,61 +319,73 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
 
-  // ─── AUTOMIX ENGINE ────────────────────────────────────────────────────
+  // ─── AUTOMIX ENGINE (BIDIRECTIONAL) ────────────────────────────────────
   ui.Mixer.autoMix.addEventListener('click', () => {
     ensureInit();
+    
+    // Determine direction dynamically
+    const fromId = state.activeDeck;
+    const toId = fromId === 'A' ? 'B' : 'A';
+    
     // Validate engine states
-    if (!state.A.buffer || !state.B.buffer) return;
-    if (!state.A.isPlaying) ui.A.play.click(); 
+    if (!state[fromId].buffer || !state[toId].buffer) return;
+    if (!state[fromId].isPlaying) ui[fromId].play.click(); 
     
     ui.Mixer.autoMix.disabled = true;
     ui.Mixer.autoMix.classList.add('active');
     ui.status.innerText = 'MIXING IN PROGRESS...';
     ui.status.style.color = "var(--orange)";
 
-    engine.onTransitionProgress = (pct) => {
-      ui.Mixer.crossfader.value = pct;
-      state.crossfader = pct;
+    engine.onTransitionProgress = (pct, fId, tId) => {
+      // Map crossfader progression based on direction
+      // A->B means fader goes 0 to 1. B->A means fader goes 1 to 0.
+      const targetCross = fId === 'A' ? pct : 1 - pct;
+      ui.Mixer.crossfader.value = targetCross;
+      state.crossfader = targetCross;
       updateVolumes(); 
       
-      // EQ Visual Update
+      // EQ Isolator Visual Update
       let pctCut = Math.min(1, pct * 2); 
-      let aLowVal = 0.5 - (0.5 * pctCut);     
-      let bLowVal = 0 + (0.5 * pctCut);       
+      let fLowVal = 0.5 - (0.5 * pctCut);     
+      let tLowVal = 0 + (0.5 * pctCut);       
       
       const renderVisual = (knob, val) => {
          knob.dataset.val = val; 
          knob.style.transform = `rotate(${(val - 0.5) * 300}deg)`;
       }
-      // Ensure we hit the dynamic binding property
-      if(ui.A.eqLow) renderVisual(ui.A.eqLow, aLowVal);
-      if(ui.B.eqLow) renderVisual(ui.B.eqLow, bLowVal);
+      if(ui[fId].eqLow) renderVisual(ui[fId].eqLow, fLowVal);
+      if(ui[tId].eqLow) renderVisual(ui[tId].eqLow, tLowVal);
     };
     
-    engine.onTransitionDone = () => {
+    engine.onTransitionDone = (fId, tId) => {
        ui.Mixer.autoMix.disabled = false;
        ui.Mixer.autoMix.classList.remove('active');
        ui.status.innerText = 'ENGINE READY';
        ui.status.style.color = "var(--green)";
        
-       waveA.stopAnimation();
-       ui.A.jog.classList.remove('spinning');
-       ui.A.play.classList.remove('active');
-       ui.A.play.style.boxShadow = '';
-       state.A.isPlaying = false;
+       const waveFrom = fId === 'A' ? waveA : waveB;
+       waveFrom.stopAnimation();
+       ui[fId].jog.classList.remove('spinning');
+       ui[fId].play.classList.remove('active');
+       ui[fId].play.style.boxShadow = '';
+       state[fId].isPlaying = false;
+       
+       // Switch the active deck permanently!
+       state.activeDeck = tId;
     };
 
-    const res = engine.autoMix(16);
+    const res = engine.autoMix(fromId, toId, 16);
     if(res.error) {
       alert(res.error);
       ui.Mixer.autoMix.disabled = false;
       ui.Mixer.autoMix.classList.remove('active');
     } else {
-      waveB.startAnimation(() => engine.getCurrentTime('B'));
-      ui.B.jog.classList.add('spinning');
-      ui.B.play.classList.add('active');
-      ui.B.play.style.boxShadow = '0 0 15px var(--green)';
-      state.B.isPlaying = true;
+      const waveTo = toId === 'A' ? waveA : waveB;
+      waveTo.startAnimation(() => engine.getCurrentTime(toId));
+      ui[toId].jog.classList.add('spinning');
+      ui[toId].play.classList.add('active');
+      ui[toId].play.style.boxShadow = '0 0 15px var(--green)';
+      state[toId].isPlaying = true;
     }
   });
 

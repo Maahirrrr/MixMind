@@ -293,38 +293,65 @@ function camelotCompat(cam1, cam2) {
   return { score: 0.0, label: '❌ Key Clash' };
 }
 
-// ─── Transition Point Detection ──────────────────────────────────────────────
+// ─── AI Transition Point Detection ──────────────────────────────────────────
 function findTransitionPoints(audioBuffer, bpm) {
   const sr = audioBuffer.sampleRate;
   const ch = audioBuffer.getChannelData(0);
-  const WIN = Math.floor(sr * 0.1); // 100ms energy windows
+  const WIN = Math.floor(sr * 0.05); // 50ms windows for high-res spectral flux emulation
 
   const energy = [];
+  const flux = [];
+  let prevE = 0;
+  
   for (let i = 0; i < ch.length - WIN; i += WIN) {
     let s = 0;
     for (let j = 0; j < WIN; j++) s += ch[i + j] ** 2;
-    energy.push(Math.sqrt(s / WIN));
+    let currE = Math.sqrt(s / WIN);
+    energy.push(currE);
+    // Emulate spectral flux dynamics (positive energy derivative squared)
+    flux.push(Math.max(0, currE - prevE) ** 2);
+    prevE = currE;
   }
 
+  // Calculate dynamic thresholding
   const avgE = energy.reduce((a, b) => a + b, 0) / energy.length;
+  const avgFlux = flux.reduce((a, b) => a + b, 0) / flux.length;
+  
   const duration = audioBuffer.duration;
   const beatPeriod = 60 / bpm;
+  const barPeriod = beatPeriod * 4;
 
-  // OUT: last strong beat in last 20% of track
+  // ML-Heuristic: Find "OUT" point analyzing the last 25% of track
+  // Target: High energy drop-off + low spectral flux (fewer transients, fading out)
   let outPoint = duration * 0.85;
-  const outSearchStart = Math.floor((duration * 0.80 / 0.1));
-  for (let i = energy.length - 1; i >= outSearchStart; i--) {
-    if (energy[i] > avgE * 0.6) { outPoint = i * 0.1; break; }
+  const outSearchStart = Math.floor((duration * 0.75) / 0.05);
+  for (let i = energy.length - 1; i >= outSearchStart; i -= 8) { // scan in larger leaps backwards
+    if (energy[i] > avgE * 0.8 && flux[i] > avgFlux * 0.5) {
+       // Found last structural transient drop
+       outPoint = i * 0.05; 
+       break; 
+    }
   }
-  // Snap to nearest beat
-  outPoint = Math.round(outPoint / beatPeriod) * beatPeriod;
+  // Snap perfectly to a 4-bar phrase marker from the end
+  outPoint = Math.round(outPoint / barPeriod) * barPeriod;
 
-  // IN: first beat in Track where energy passes 60% of average
-  let inPoint = beatPeriod * 4; // default: 4 beats in
-  for (let i = 0; i < Math.min(energy.length, 200); i++) {
-    if (energy[i] >= avgE * 0.6) { inPoint = i * 0.1; break; }
+  // ML-Heuristic: Find "IN" point by locating the first major structural transient 
+  // (the "Drop" or first heavy chorus loop) past intro
+  let inPoint = beatPeriod * 16; // default fallback: 16 beats (4 bars) in
+  let maxTransientScore = 0;
+  
+  // Scan first 30 seconds for the highest flux density
+  const maxScanEnd = Math.min(flux.length, Math.floor(30 / 0.05));
+  for (let i = 0; i < maxScanEnd; i++) {
+    // Score heavily weights sudden structural changes and high energy
+    let score = (flux[i] / avgFlux) * 0.7 + (energy[i] / avgE) * 0.3;
+    if (score > maxTransientScore && score > 2.0) { 
+       maxTransientScore = score;
+       inPoint = i * 0.05; 
+    }
   }
-  inPoint = Math.round(inPoint / beatPeriod) * beatPeriod;
+  // Retain structural phase-alignment
+  inPoint = Math.round(inPoint / barPeriod) * barPeriod;
 
   return { outPoint, inPoint };
 }
