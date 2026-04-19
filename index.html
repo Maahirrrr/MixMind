@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>MixMind | Pioneer DJ Engine</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700;900&family=Oswald:wght@500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+  <!-- SOFTWARE UI (Top waveforms and intelligence) -->
+  <div class="software-board">
+    <div class="top-bar">
+      <div class="brand">MIXMIND <span>PRO</span></div>
+      <div class="status-indicator" id="app-status">ENGINE READY</div>
+    </div>
+    
+    <div class="waveforms-container">
+      <div class="wave-track">
+        <canvas id="waveA"></canvas>
+        <div class="wave-overlay-info">
+          <span class="deck-lbl">DECK A</span> <span class="val" id="bpm-A">0.0</span> BPM | <span class="val" id="key-A">--</span>
+        </div>
+      </div>
+      
+      <div class="mix-brain">
+        <div class="mb-label">COMPATIBILITY</div>
+        <div class="mb-score" id="compat-score">--</div>
+        <div class="mb-detail" id="compat-bpm">BPM: --</div>
+        <div class="mb-detail" id="compat-key">KEY: --</div>
+      </div>
+
+      <div class="wave-track">
+        <canvas id="waveB"></canvas>
+        <div class="wave-overlay-info right">
+          <span class="val" id="bpm-B">0.0</span> BPM | <span class="val" id="key-B">--</span> <span class="deck-lbl">DECK B</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- HARDWARE CONTROLLER UI (Bottom Physical Layout) -->
+  <div class="hardware-container">
+    <div class="hardware-board">
+      
+      <!-- DECK A -->
+      <div class="hardware-deck" id="deck-A">
+        <div class="deck-top-controls">
+          <button class="round-btn load-btn" id="load-A-btn">LOAD</button>
+          <input type="file" id="file-A" accept="audio/*" style="display:none;">
+        </div>
+        
+        <div class="jog-section">
+          <div class="jog-wheel" id="jog-A" title="Click to load track">
+            <div class="jog-ring"></div>
+            <div class="jog-center">
+              <div class="jog-logo">MM</div>
+            </div>
+            <div class="jog-marker"></div>
+          </div>
+        </div>
+
+        <div class="deck-bottom-controls">
+          <div class="transport-section">
+            <button class="round-btn cue-btn" id="cue-A" disabled>CUE</button>
+            <button class="round-btn play-btn" id="play-A" disabled>▶/⏸</button>
+          </div>
+          
+          <div class="pads-section">
+            <div class="pad-grid">
+              <div class="pad">HOT CUE</div><div class="pad">PAD FX1</div><div class="pad">BEAT JUMP</div><div class="pad">SAMPLER</div>
+              <div class="pad">KEYBOARD</div><div class="pad">PAD FX2</div><div class="pad">BEAT LOOP</div><div class="pad">KEY SHIFT</div>
+            </div>
+          </div>
+
+          <div class="pitch-section">
+            <div class="fader-track-vertical">
+              <input type="range" class="pitch-fader" min="-10" max="10" step="0.1" value="0">
+            </div>
+          </div>
+        </div>
+      </div>
+
+
+      <!-- MIXER -->
+      <div class="hardware-mixer">
+        <div class="mixer-channels">
+          
+          <!-- Channel 1 (A) -->
+          <div class="channel-strip">
+            <div class="knob-group">
+              <span class="knob-label">TRIM</span>
+              <div class="knob" data-val="0.5"> <div class="knob-pointer"></div> </div>
+            </div>
+            <div class="knob-group">
+              <span class="knob-label">HI</span>
+              <div class="knob eq-knob" id="eq-hi-a"> <div class="knob-pointer"></div> </div>
+            </div>
+            <div class="knob-group">
+              <span class="knob-label">MID</span>
+              <div class="knob eq-knob" id="eq-mid-a"> <div class="knob-pointer"></div> </div>
+            </div>
+            <div class="knob-group">
+              <span class="knob-label">LOW</span>
+              <div class="knob eq-knob" id="eq-low-a"> <div class="knob-pointer"></div> </div>
+            </div>
+            
+            <div class="vu-meter">
+              <div class="vu-leds" id="vu-A"></div>
+            </div>
+
+            <div class="fader-track-vertical vol-fader-track">
+              <input type="range" class="vol-fader" id="vol-A" min="0" max="1" step="0.01" value="1">
+            </div>
+          </div>
+
+          <!-- Center Brain -->
+          <div class="mixer-center">
+            <div class="master-knob-group">
+              <span class="knob-label">MASTER</span>
+              <div class="knob large"> <div class="knob-pointer"></div> </div>
+            </div>
+            
+            <button class="auto-mix-btn hardware-auto" id="auto-mix-btn" disabled>
+              <div class="btn-glow"></div>
+              <span>SMART<br>MIX</span>
+            </button>
+          </div>
+
+          <!-- Channel 2 (B) -->
+          <div class="channel-strip">
+            <div class="knob-group">
+              <span class="knob-label">TRIM</span>
+              <div class="knob" data-val="0.5"> <div class="knob-pointer"></div> </div>
+            </div>
+            <div class="knob-group">
+              <span class="knob-label">HI</span>
+              <div class="knob eq-knob" id="eq-hi-b"> <div class="knob-pointer"></div> </div>
+            </div>
+            <div class="knob-group">
+              <span class="knob-label">MID</span>
+              <div class="knob eq-knob" id="eq-mid-b"> <div class="knob-pointer"></div> </div>
+            </div>
+            <div class="knob-group">
+              <span class="knob-label">LOW</span>
+              <div class="knob eq-knob" id="eq-low-b"> <div class="knob-pointer"></div> </div>
+            </div>
+
+            <div class="vu-meter">
+              <div class="vu-leds" id="vu-B"></div>
+            </div>
+
+            <div class="fader-track-vertical vol-fader-track">
+              <input type="range" class="vol-fader" id="vol-B" min="0" max="1" step="0.01" value="1">
+            </div>
+          </div>
+
+        </div>
+
+        <div class="crossfader-area">
+          <div class="fader-track-horizontal crossfader-track">
+            <input type="range" id="crossfader" min="0" max="1" step="0.01" value="0.5">
+          </div>
+        </div>
+      </div>
+
+
+      <!-- DECK B -->
+      <div class="hardware-deck" id="deck-B">
+        <div class="deck-top-controls" style="justify-content: flex-end;">
+          <button class="round-btn load-btn" id="load-B-btn">LOAD</button>
+          <input type="file" id="file-B" accept="audio/*" style="display:none;">
+        </div>
+        
+        <div class="jog-section">
+          <div class="jog-wheel" id="jog-B" title="Click to load track">
+            <div class="jog-ring"></div>
+            <div class="jog-center">
+              <div class="jog-logo">MM</div>
+            </div>
+            <div class="jog-marker"></div>
+          </div>
+        </div>
+
+        <div class="deck-bottom-controls">
+          <div class="transport-section">
+            <button class="round-btn cue-btn" id="cue-B" disabled>CUE</button>
+            <button class="round-btn play-btn" id="play-B" disabled>▶/⏸</button>
+          </div>
+          
+          <div class="pads-section">
+            <div class="pad-grid">
+              <div class="pad">HOT CUE</div><div class="pad">PAD FX1</div><div class="pad">BEAT JUMP</div><div class="pad">SAMPLER</div>
+              <div class="pad">KEYBOARD</div><div class="pad">PAD FX2</div><div class="pad">BEAT LOOP</div><div class="pad">KEY SHIFT</div>
+            </div>
+          </div>
+
+          <div class="pitch-section">
+            <div class="fader-track-vertical">
+              <input type="range" class="pitch-fader" min="-10" max="10" step="0.1" value="0">
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <script src="js/analyzer.js"></script>
+  <script src="js/waveform.js"></script>
+  <script src="js/mixer.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
