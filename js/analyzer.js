@@ -106,9 +106,25 @@ async function detectBPM(audioBuffer) {
   for (let lag = minLag; lag <= maxLag; lag++) {
     if (acf[lag] > acf[best]) best = lag;
   }
+
+  // Resolve harmonic ambiguity
+  const halfLag = Math.round(best / 2);
+  if (halfLag >= minLag && acf[halfLag] > acf[best] * 0.85) {
+    best = halfLag; // double-time was the true tempo
+  }
+
+  // Also check 2x lag (half-time)
+  const doubleLag = best * 2;
+  if (doubleLag <= maxLag && acf[doubleLag] > acf[best] * 0.9) {
+    // Both are valid — pick whichever is closer to 120
+    const bpmA = 60 / (best * hopDur);
+    const bpmB = 60 / (doubleLag * hopDur);
+    if (Math.abs(bpmB - 120) < Math.abs(bpmA - 120)) best = doubleLag;
+  }
+
   let rawBpm = 60 / (best * hopDur);
 
-  // Normalize to 70–175 BPM (handle half/double time)
+  // Normalize to 70–175 BPM fallback (handle extreme half/double boundaries)
   while (rawBpm < 70) rawBpm *= 2;
   while (rawBpm > 175) rawBpm /= 2;
 
@@ -118,42 +134,66 @@ async function detectBPM(audioBuffer) {
   return { bpm, beatPeriod };
 }
 
-// ─── Beat Grid ───────────────────────────────────────────────────────────────
-function buildBeatGrid(startOffset, beatPeriod, totalDuration) {
-  const beats = [];
-  for (let t = startOffset; t < totalDuration; t += beatPeriod) {
-    beats.push(t);
-  }
-  return beats;
-}
-
-// Estimate the first downbeat by finding the first high-energy onset
-function estimateFirstBeat(audioBuffer, bpm) {
-  const sr = audioBuffer.sampleRate;
-  const beatPeriod = 60 / bpm;
-  const winSamples = Math.floor(beatPeriod * sr);
-  const ch = audioBuffer.getChannelData(0);
-
-  let maxEnergy = -Infinity;
-  let firstBeat = 0;
-
-  // Scan first 8 beats for highest energy onset
-  for (let i = 0; i < Math.min(8 * winSamples, ch.length - winSamples); i += Math.floor(winSamples / 4)) {
-    let e = 0;
-    for (let j = 0; j < winSamples; j++) e += ch[i + j] ** 2;
-    if (e > maxEnergy) { maxEnergy = e; firstBeat = i / sr; }
-  }
-
-  return firstBeat % beatPeriod; // offset within one beat period
-}
 
 // ─── Key Detection ───────────────────────────────────────────────────────────
 async function detectKey(audioBuffer) {
-  const sampleRate = audioBuffer.sampleRate;
+  const dur = audioBuffer.duration;
+  let segs = [];
+  
+  if (dur < 40) {
+    segs.push([0, dur]);
+  } else {
+    // Analyze 3 segments: intro skip, middle, outro skip
+    segs.push([Math.min(15, dur * 0.1), 30]);
+    segs.push([dur * 0.5 - 15, 30]);
+    segs.push([dur * 0.85 - 15, 30]);
+  }
 
-  // Use middle 30s of track for stability
-  const startTime = Math.min(audioBuffer.duration * 0.3, 30);
-  const duration = Math.min(30, audioBuffer.duration - startTime);
+  let chromas = [];
+  for (let [start, len] of segs) {
+    if (start < 0) start = 0;
+    if (start + len > dur) len = dur - start;
+    chromas.push(await _computeChromaForSegment(audioBuffer, start, len));
+  }
+
+  // Median Chroma Vector
+  const chroma = new Float64Array(12);
+  if (chromas.length === 1) {
+    for (let i=0; i<12; i++) chroma[i] = chromas[0][i];
+  } else {
+    for (let i=0; i<12; i++) {
+      let vals = chromas.map(c => c[i]).sort((a,b) => a - b);
+      chroma[i] = vals[Math.floor(vals.length / 2)];
+    }
+  }
+
+  // Normalize median chroma
+  const sum = chroma.reduce((s, v) => s + v, 0);
+  if (sum > 0) for (let i = 0; i < 12; i++) chroma[i] /= sum;
+
+  // Correlate with all 12 rotations of major + minor profiles
+  let bestScore = -Infinity;
+  let bestKey = 0;
+  let bestMode = 'major';
+
+  for (let k = 0; k < 12; k++) {
+    const majRotated = rotate(KS_MAJOR, k);
+    const minRotated = rotate(KS_MINOR, k);
+    const majScore = pearsonCorr(Array.from(chroma), majRotated);
+    const minScore = pearsonCorr(Array.from(chroma), minRotated);
+    if (majScore > bestScore) { bestScore = majScore; bestKey = k; bestMode = 'major'; }
+    if (minScore > bestScore) { bestScore = minScore; bestKey = k; bestMode = 'minor'; }
+  }
+
+  const keyName = NOTE_NAMES[bestKey];
+  const keyStr = `${keyName} ${bestMode}`;
+  const camelot = CAMELOT[keyStr] || '??';
+
+  return { key: keyName, mode: bestMode, camelot, confidence: bestScore };
+}
+
+async function _computeChromaForSegment(audioBuffer, startTime, duration) {
+  const sampleRate = audioBuffer.sampleRate;
   const numSamples = Math.floor(duration * sampleRate);
   const startSample = Math.floor(startTime * sampleRate);
 
@@ -180,62 +220,31 @@ async function detectKey(audioBuffer) {
   const rendered = await offCtx.startRendering();
   const data = rendered.getChannelData(0);
 
-  // Build chroma vector via FFT using Cooley-Tukey
   const FFT_SIZE = 8192;
   const chroma = new Float64Array(12);
   const frameHop = Math.floor(FFT_SIZE / 2);
 
-  let frameCount = 0;
   for (let i = 0; i + FFT_SIZE < data.length; i += frameHop) {
     const frame = data.slice(i, i + FFT_SIZE);
     const mag = computeFFTMagnitude(frame, FFT_SIZE);
     accumulateChroma(mag, sampleRate, FFT_SIZE, chroma);
-    frameCount++;
   }
-
-  // Normalize chroma
-  const sum = chroma.reduce((s, v) => s + v, 0);
-  if (sum > 0) for (let i = 0; i < 12; i++) chroma[i] /= sum;
-
-  // Correlate with all 12 rotations of major + minor profiles
-  let bestScore = -Infinity;
-  let bestKey = 0;
-  let bestMode = 'major';
-
-  for (let k = 0; k < 12; k++) {
-    const majRotated = rotate(KS_MAJOR, k);
-    const minRotated = rotate(KS_MINOR, k);
-    const majScore = pearsonCorr(Array.from(chroma), majRotated);
-    const minScore = pearsonCorr(Array.from(chroma), minRotated);
-    if (majScore > bestScore) { bestScore = majScore; bestKey = k; bestMode = 'major'; }
-    if (minScore > bestScore) { bestScore = minScore; bestKey = k; bestMode = 'minor'; }
-  }
-
-  const keyName = NOTE_NAMES[bestKey];
-  const keyStr = `${keyName} ${bestMode}`;
-  const camelot = CAMELOT[keyStr] || '??';
-
-  return { key: keyName, mode: bestMode, camelot, confidence: bestScore };
+  return chroma;
 }
 
-// Simple DFT-based magnitude spectrum (no full FFT library needed for this use)
+// Simple DFT-based magnitude spectrum
 function computeFFTMagnitude(frame, fftSize) {
-  // Apply Hann window
   const windowed = new Float64Array(fftSize);
   for (let i = 0; i < fftSize; i++) {
     windowed[i] = frame[i] * (0.5 * (1 - Math.cos((2 * Math.PI * i) / (fftSize - 1))));
   }
-  // For performance, use a simplified magnitude spectrum via DFT on reduced points
-  // Then map to chroma. We only need spectral shape, not phase.
+  
   const N = fftSize;
   const mag = new Float64Array(N / 2);
-
-  // Cooley-Tukey FFT (iterative, in-place on real signal)
   const re = new Float64Array(N);
   const im = new Float64Array(N);
   for (let i = 0; i < N; i++) re[i] = windowed[i];
 
-  // Bit-reversal
   let j = 0;
   for (let i = 1; i < N; i++) {
     let bit = N >> 1;
@@ -244,7 +253,6 @@ function computeFFTMagnitude(frame, fftSize) {
     if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]]; }
   }
 
-  // FFT butterfly
   for (let len = 2; len <= N; len <<= 1) {
     const ang = (2 * Math.PI) / len;
     const wRe = Math.cos(ang), wIm = -Math.sin(ang);
@@ -269,91 +277,103 @@ function computeFFTMagnitude(frame, fftSize) {
 
 function accumulateChroma(mag, sampleRate, fftSize, chroma) {
   const freqPerBin = sampleRate / fftSize;
-  // A4 = 440 Hz = MIDI 69
   for (let bin = 1; bin < mag.length; bin++) {
     const freq = bin * freqPerBin;
     if (freq < 60 || freq > 5000) continue;
-    // Map frequency to MIDI note
+    
     const midi = 12 * Math.log2(freq / 440) + 69;
-    const pitchClass = ((Math.round(midi) % 12) + 12) % 12;
-    chroma[pitchClass] += mag[bin];
+    const pitchClass = ((midi % 12) + 12) % 12;
+    const nearest = Math.round(pitchClass);
+    const dist = Math.abs(pitchClass - nearest);
+    
+    // Gaussian weight — bins far from semitone center contribute less
+    const weight = Math.exp(-(dist * dist) / (2 * 0.25 * 0.25));
+    chroma[((nearest % 12) + 12) % 12] += mag[bin] * weight;
   }
 }
 
 // ─── Camelot Compatibility ───────────────────────────────────────────────────
-function camelotCompat(cam1, cam2) {
-  if (cam1 === '??' || cam2 === '??') return { score: 0.3, label: '❓ Unknown' };
-  if (cam1 === cam2) return { score: 1.0, label: '✅ Perfect' };
-  const n1 = parseInt(cam1), l1 = cam1.slice(-1);
-  const n2 = parseInt(cam2), l2 = cam2.slice(-1);
-  if (isNaN(n1) || isNaN(n2)) return { score: 0.3, label: '❓ Unknown' };
-  if (n1 === n2 && l1 !== l2) return { score: 0.75, label: '⚠️ Safe (relative)' };
-  const d = Math.min(Math.abs(n1 - n2), 12 - Math.abs(n1 - n2));
-  if (d === 1 && l1 === l2) return { score: 0.7, label: '⚠️ Safe (adjacent)' };
-  return { score: 0.0, label: '❌ Key Clash' };
+function camelotCompat(cam1, cam2, energy1 = 0.5, energy2 = 0.5) {
+  let keyScore = 0;
+  let label = '❌ Key Clash';
+
+  if (cam1 === '??' || cam2 === '??') {
+      keyScore = 0.3; label = '❓ Unknown';
+  } else if (cam1 === cam2) {
+      keyScore = 1.0; label = '✅ Perfect';
+  } else {
+      const n1 = parseInt(cam1), l1 = cam1.slice(-1);
+      const n2 = parseInt(cam2), l2 = cam2.slice(-1);
+      if (!isNaN(n1) && !isNaN(n2)) {
+          if (n1 === n2 && l1 !== l2) {
+              keyScore = 0.75; label = '⚠️ Safe (relative)';
+          } else {
+              const d = Math.min(Math.abs(n1 - n2), 12 - Math.abs(n1 - n2));
+              if (d === 1 && l1 === l2) {
+                  keyScore = 0.7; label = '⚠️ Safe (adjacent)';
+              } else {
+                  keyScore = 0.0; label = '❌ Key Clash';
+              }
+          }
+      }
+  }
+
+  // Energy compatibility penalty
+  const energyDelta = Math.abs(energy1 - energy2);
+  const energyScore = Math.max(0, 1 - energyDelta * 1.5); // 0.67 delta = score 0
+  
+  // Combined: key matters more (70%) but energy matters (30%)
+  const combined = keyScore * 0.7 + energyScore * 0.3;
+  return { score: combined, label: label };
 }
 
 // ─── AI Transition Point Detection ──────────────────────────────────────────
 function findTransitionPoints(audioBuffer, bpm) {
   const sr = audioBuffer.sampleRate;
   const ch = audioBuffer.getChannelData(0);
-  const WIN = Math.floor(sr * 0.05); // 50ms windows for high-res spectral flux emulation
+  const WIN = Math.floor(sr * 0.05); // 50ms windows 
 
   const energy = [];
-  const flux = [];
-  let prevE = 0;
-  
   for (let i = 0; i < ch.length - WIN; i += WIN) {
     let s = 0;
     for (let j = 0; j < WIN; j++) s += ch[i + j] ** 2;
-    let currE = Math.sqrt(s / WIN);
-    energy.push(currE);
-    // Emulate spectral flux dynamics (positive energy derivative squared)
-    flux.push(Math.max(0, currE - prevE) ** 2);
-    prevE = currE;
+    energy.push(Math.sqrt(s / WIN));
   }
 
-  // Calculate dynamic thresholding
-  const avgE = energy.reduce((a, b) => a + b, 0) / energy.length;
-  const avgFlux = flux.reduce((a, b) => a + b, 0) / flux.length;
-  
   const duration = audioBuffer.duration;
   const beatPeriod = 60 / bpm;
   const barPeriod = beatPeriod * 4;
 
-  // ML-Heuristic: Find "OUT" point analyzing the last 25% of track
-  // Target: High energy drop-off + low spectral flux (fewer transients, fading out)
-  let outPoint = duration * 0.85;
-  const outSearchStart = Math.floor((duration * 0.75) / 0.05);
-  for (let i = energy.length - 1; i >= outSearchStart; i -= 8) { // scan in larger leaps backwards
-    if (energy[i] > avgE * 0.8 && flux[i] > avgFlux * 0.5) {
-       // Found last structural transient drop
-       outPoint = i * 0.05; 
-       break; 
+  const peakE = Math.max(...energy);
+  const avgE = energy.reduce((a, b) => a + b, 0) / energy.length;
+  // Use normalized average energy as generic 'track energy level' for compatibility mapping
+  const trackEnergy = Math.min(1, avgE / (peakE || 1));
+
+  // OUT point: find last bar where energy stays above 70% of peak for 4 consecutive windows
+  const threshold = peakE * 0.70;
+  let outIdx = energy.length - 1;
+  for (let i = energy.length - 1; i >= Math.floor(energy.length * 0.6); i--) {
+    if (i + 4 < energy.length &&
+        energy[i] > threshold && energy[i+1] > threshold &&
+        energy[i+2] > threshold && energy[i+3] > threshold) {
+      outIdx = i;
+      break;
     }
   }
-  // Snap perfectly to a 4-bar phrase marker from the end
-  outPoint = Math.round(outPoint / barPeriod) * barPeriod;
+  let outPoint = Math.round((outIdx * 0.05) / barPeriod) * barPeriod;
 
-  // ML-Heuristic: Find "IN" point by locating the first major structural transient 
-  // (the "Drop" or first heavy chorus loop) past intro
-  let inPoint = beatPeriod * 16; // default fallback: 16 beats (4 bars) in
-  let maxTransientScore = 0;
-  
-  // Scan first 30 seconds for the highest flux density
-  const maxScanEnd = Math.min(flux.length, Math.floor(30 / 0.05));
-  for (let i = 0; i < maxScanEnd; i++) {
-    // Score heavily weights sudden structural changes and high energy
-    let score = (flux[i] / avgFlux) * 0.7 + (energy[i] / avgE) * 0.3;
-    if (score > maxTransientScore && score > 2.0) { 
-       maxTransientScore = score;
-       inPoint = i * 0.05; 
+  // IN point: find where energy first sustains above 60% of peak for 8+ consecutive windows
+  let inIdx = 0;
+  for (let i = 0; i < Math.floor(energy.length * 0.5); i++) {
+    let sustained = true;
+    for (let k = 0; k < 8; k++) {
+      if (!energy[i + k] || energy[i + k] < peakE * 0.60) { sustained = false; break; }
     }
+    if (sustained) { inIdx = i; break; }
   }
-  // Retain structural phase-alignment
-  inPoint = Math.round(inPoint / barPeriod) * barPeriod;
+  let inPoint = Math.round((inIdx * 0.05) / barPeriod) * barPeriod;
 
-  return { outPoint, inPoint };
+  return { outPoint, inPoint, trackEnergy };
 }
 
 // ─── BPM score ───────────────────────────────────────────────────────────────
@@ -362,11 +382,13 @@ function bpmScore(a, b, maxJump = 8) {
   const dbl = Math.abs(a - b * 2);
   const half = Math.abs(a * 2 - b);
   const diff = Math.min(direct, dbl, half);
-  return Math.max(0, 1 - diff / Math.max(maxJump, 1));
+  
+  // Softer falloff curve — penalize less for small overages
+  const normalized = diff / Math.max(maxJump, 1);
+  return Math.max(0, 1 - normalized * normalized); // quadratic falloff
 }
 
 // ─── Exports ─────────────────────────────────────────────────────────────────
 window.MixMindAnalyzer = {
-  detectBPM, detectKey, buildBeatGrid, estimateFirstBeat,
-  findTransitionPoints, camelotCompat, bpmScore, CAMELOT, NOTE_NAMES
+  detectBPM, detectKey, findTransitionPoints, camelotCompat, bpmScore, CAMELOT, NOTE_NAMES
 };

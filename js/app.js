@@ -175,7 +175,8 @@ document.addEventListener('DOMContentLoaded', () => {
       
       state[deckId].analysis = {
         bpm: bpmData.bpm, keyName: keyData.key, mode: keyData.mode,
-        camelot: keyData.camelot, outPoint: transitions.outPoint, inPoint: transitions.inPoint
+        camelot: keyData.camelot, outPoint: transitions.outPoint, 
+        inPoint: transitions.inPoint, energy: transitions.trackEnergy
       };
       state[deckId].baseBpm = bpmData.bpm;
 
@@ -221,7 +222,10 @@ document.addEventListener('DOMContentLoaded', () => {
       let bpmCol = bpmSc > 0.8 ? 'var(--green)' : bpmSc > 0.4 ? 'var(--gold)' : 'var(--red)';
       ui.Mixer.compatBpm.innerHTML = `BPM: <span style="color:${bpmCol}">${effectiveBpmA.toFixed(1)} → ${effectiveBpmB.toFixed(1)}</span>`;
 
-      const keyComp = MixMindAnalyzer.camelotCompat(state.A.analysis.camelot, state.B.analysis.camelot);
+      const keyComp = MixMindAnalyzer.camelotCompat(
+        state.A.analysis.camelot, state.B.analysis.camelot, 
+        state.A.analysis.energy, state.B.analysis.energy
+      );
       let keyCol = keyComp.score >= 0.7 ? 'var(--green)' : keyComp.score >= 0.4 ? 'var(--gold)' : 'var(--red)';
       ui.Mixer.compatKey.innerHTML = `KEY: <span style="color:${keyCol}">${state.A.analysis.camelot} → ${state.B.analysis.camelot}</span>`;
 
